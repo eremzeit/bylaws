@@ -1,6 +1,13 @@
 const _ = require('lodash');
 const assert = require('assert');
-const DELIMITER = '/';
+
+const {
+  pathStringToKeys,
+  pathArrayToPathStr,
+  pathJoin,
+  isAbsolutePath,
+  dirPathAndFileName,
+} = require('./paths');
 
 // this is a bit awkward.  In the next version detection
 // should be done either 1) via a reserved keyword or 2)
@@ -9,30 +16,8 @@ const DELIMITER = '/';
 // leaf-nodes,
 function isBylawRule(object) {
   return object
-      && object.hasOwnProperty('actions')
-      && object.hasOwnProperty('value');
-}
-
-function pathJoin(_pathArray, isAbsolute) {
-  assert(_.isArray(_pathArray));
-
-  if (_pathArray.length === 0) {
-    return '/';
-  }
-
-  const pathArray = _pathArray.map((x) => {
-    if (!x.match(/^[a-zA-Z0-9_-]+$/)) {
-      throw new Error('Must use valid characters in bylaw path');
-    }
-
-    return x;
-  });
-
-  if (isAbsolute) {
-    return ensureAbsolutePath(pathArray.join(DELIMITER));
-  } else {
-    return pathArray.join(DELIMITER);
-  }
+      && object.hasOwnProperty('value')
+      && object.hasOwnProperty('triggers')
 }
 
 function isIterable(obj) {
@@ -40,65 +25,15 @@ function isIterable(obj) {
   if (obj == null) {
     return false;
   }
+
   return typeof obj[Symbol.iterator] === 'function';
 }
 
-function isAbsolutePath(path) {
-  return path.length && path[0] === DELIMITER;
-}
-
-function removeLeadingSlash(path) {
-  if (isAbsolutePath) {
-    return path.substr(1)
-  } else {
-    return path;
-  }
-}
-
-function pathStringToKeys(path) {
-  return path.replace(/^\//, '').split(DELIMITER)
-}
-
-function ensureAbsolutePath(path) {
-  if (isAbsolutePath(path)) {
-    return path;
-  } else {
-    return DELIMITER + path;
-  }
-}
-
-function resolvePath(path, currentPath = DELIMITER) {
-  if (currentPath.length === 0 || currentPath[0] !== DELIMITER) {
-    throw new Error('currentPath must be a non-empty absolute path');
-  }
-
-  const isAbsolute = isAbsolutePath(path);
-
-  // find starting point before parsing
-  let newPath
-  if (isAbsolute) {
-    newPath = [];
-  } else {
-    newPath = removeLeadingSlash(currentPath).split(DELIMITER);
-  }
-
-  const pathSegments = removeLeadingSlash(path).split(DELIMITER);
-
-  pathSegments.forEach((segment) => {
-    if (segment === '.') {
-      //nothing
-    } else if (segment === '..') {
-      newPath.pop();
-    } else if (segment) {
-      newPath.push(segment);
-    }
-  });
-
-  return pathJoin(newPath, true);
-}
 
 function mapSelectedNodes(_object, _isSelected, _mapFn, _currentPath = []) {
   const keyValuesPairs = _.entries(_object);
+
+  assert(!_.isString(_object), 'Object cannot be a string');
 
   return _.chain(_object).toPairs().map((pair) => {
     const [key, value] = pair;
@@ -150,32 +85,63 @@ function selectNodes(_object, _selectFn) {
     x => x[1]
   );
 }
-
 const isLeafNode = _node => isBylawRule(_node) || _.isArray(_node);
 const mapLeafNodes = _.curry(mapSelectedNodes)(_, isLeafNode, _);
+
+function relativeToAbsolute(_currentPathStr) {
+  return (_relativePath) => {
+    if (isAbsolutePath(_relativePath)) {
+      return _relativePath;
+    } else {
+      let [dirPath, fileName] = dirPathAndFileName(_currentPathStr);
+      return pathJoin(dirPath, _relativePath);
+    }
+  };
+}
+
+const getTriggersActions = (_rule) => _.get(_rule, ['triggers', 'actions'], []);
+const getTriggersOnExec = (_rule) => _.get(_rule, ['triggers', 'onExec'], []);
 
 function preprocessBylawRules(_bylawNode) {
   const tree = mapLeafNodes(
     _bylawNode,
-    (_node, _currentPath) => {
-      let node = _node;
+    (_nodes, _currentPathArray) => {
+      let nodes = _nodes;
 
-      if (isBylawRule(node)) {
-        node = [node];
+      if (isBylawRule(nodes)) {
+        nodes = [nodes];
       }
 
-      if (isIterable(node)) {
-        return _.map(node, (_x) => {
-          const sources = _x.sources || [];
+      if (isIterable(nodes) && !_.isString(nodes)) {
+        return _.map(nodes, (_x) => {
+          //console.log('_x:', _x)
+          // annotate the original nodes with some reference information
+          const destPath = pathArrayToPathStr(_currentPathArray, true);
 
-          // annotate the original node with some reference information
-          return Object.assign({}, _x, {
-            destPath:  pathJoin(_currentPath, true),
-            sourcesAbsolute: sources.map(_source => resolvePath(_source, pathJoin(_currentPath, true))),
+          const sources = _x.sources || [];
+          const triggers = getTriggersOnExec(_x) || [];
+
+          const currentPathStr = pathArrayToPathStr(_currentPathArray, true);
+          const sourcesAbsolute = sources.map(relativeToAbsolute(currentPathStr));
+          const triggersAbsolute = triggers.map(relativeToAbsolute(currentPathStr));
+
+//           console.log('')
+//           console.log('processing node at:', destPath)
+//           console.log('sources:', sourcesAbsolute)
+//           console.log('triggers:', triggersAbsolute)
+//
+          //console.log(`abs sources at ${destPath}: `, sourcesAbsolute);
+          const r = Object.assign({}, _x, {
+            destPath,
+            sourcesAbsolute,
+            triggersAbsolute,
           });
+
+          //console.log('processed node:', r)
+          return r;
         });
       } else {
-        return node;
+        return nodes;
       }
   });
 
@@ -211,44 +177,83 @@ function findNodeAtPath(_bylawTree, _path) {
   return _.get(_bylawTree, path);
 }
 
+function isPathLeafNode(_bylawNode, _path) {
+  return isLeafNode(findNodeAtPath(_bylawNode, _path));
+}
+
+
+function getTriggerDependencies(_bylawTree, _rule, _visited=[]) {
+  return getDependencies(_bylawTree, _rule, _visited, x => x.triggersAbsolute);
+}
+
+function getAllDependencies(_bylawTree, _rule, _visited=[]) {
+  return getDependencies(
+    _bylawTree,
+    _rule,
+    _visited,
+    x => [].concat(x.triggersAbsolute).concat(x.sourcesAbsolute)
+  );
+}
+
+const ind = x => Array(x+2).join('    ');
+
 // A rule X depends on another rule Y if the first rule has a source that is equal (or is a parent directory) to the destination path of rule Y.
 // Could potentially be sped up by memoization
-function getDependencies(_bylawTree, _rule, _visited=new Set()) {
+function getDependencies(_bylawTree, _rule, _visited=[], _pathSelector, _depth = 0) {
+  //console.log(`deps for '${_rule.destPath}'`);
   assert(_rule, 'rule must exist');
 
-  if (_visited.has(_rule.destPath)) {
-    return new Set()
-  }
-  _visited.add(_rule.destPath);
+  //console.log(`${ind(_depth)}getDependencies:(${_rule.destPath})`);
 
-  const dependentRules = _.chain(_rule.sourcesAbsolute).flatMapDeep((sourcePath) => {
-    return getChildRulesAtPath(_bylawTree, sourcePath);
-  }).map((depRule) => {
-    let dependentRules = new Set([depRule.destPath]);
-
-    let ancestorDepRules = depRule.dependentRules ?
-      depRule.dependentRules
-      : getDependencies(_bylawTree, depRule, _visited);
-
-    return new Set([...dependentRules, ...ancestorDepRules]);
-  }).reduce((x, acc) => {
-    return new Set([...acc, ...x])
-  }, new Set()).value();
-
-  _rule.dependentRules = dependentRules;
-  if (dependentRules.has(_rule.destPath)) {
-    throw new Error('Circular dependency detected');
+  if (_visited[_rule.destPath]) {
+    return {};
   }
 
+  _visited[_rule.destPath] = _rule;
+
+  let dependentRules = _.chain(_pathSelector(_rule))
+    .flatMap((depPath) => {
+      const r = getChildRulesAtPath(_bylawTree, depPath);
+      // console.log(ind(_depth), 'children:', r.map(x => x.destPath));
+      return r;
+    })
+
+
+
+    .map((depRule) => {
+      let ancestorDepRules = getDependencies(_bylawTree, depRule, _visited, _pathSelector, _depth + 1);
+
+      if (ancestorDepRules[_rule.destPath]) {
+        throw new Error(`Dependency cycle was detected at path: ${_rule.destPath}`);
+      }
+
+      return Object.assign({},
+        {
+          [depRule.destPath]: depRule
+        },
+
+        ancestorDepRules
+      );
+    })
+
+    .reduce((x, acc) => {
+      return Object.assign({}, acc, x);
+    }, {})
+
+    .value();
+
+  // console.log(ind(_depth), '->', _.keys(dependentRules))
+  // console.log('')
   return dependentRules;
 };
 
 function ruleOrderComparator(_bylawTree, _rule1, _rule2) {
-  const getDeps = _.partial(getDependencies, _bylawTree);
-  if (getDeps(_rule1).has(_rule2.destPath)) {
+  const getDeps = _.partial(getAllDependencies, _bylawTree);
+
+  if (getDeps(_rule1)[_rule2.destPath]) {
     //console.log(`${_rule1.destPath} depends on ${_rule2.destPath}`)
     return 1;
-  } else if (getDeps(_rule2).has(_rule1.destPath)) {
+  } else if (getDeps(_rule2)[_rule1.destPath]) {
     //console.log(`${_rule2.destPath} depends on ${_rule1.destPath}`)
     return -1;
   } else {
@@ -259,8 +264,7 @@ function ruleOrderComparator(_bylawTree, _rule1, _rule2) {
 
 // returns an array of bylaw rules in order that reflects their execution order
 function findExecutionOrder(_bylawTree) {
-  const bylawTree = preprocessBylawRules(_bylawTree);
-  let rules = selectRuleNodes(bylawTree);
+  let rules = selectRuleNodes(_bylawTree);
   rules.sort(_.partial(ruleOrderComparator, _bylawTree));
   return rules;
 }
@@ -269,21 +273,74 @@ const _defaultConfig = {
   updateStateAtPath: _.set,
   getStateAtPath: _.get,
   ruleMatcher: (rule, actionItem) => {
-    return rule.actions.find(x => x === actionItem.type)
+    return getTriggersActions(rule).find(x => x === actionItem.type)
   },
 };
 
 function compileBylaws(_bylaws, _config=_defaultConfig) {
-  const rules = findExecutionOrder(_bylaws);
+  const bylawTree = preprocessBylawRules(_bylaws);
+  const rules = findExecutionOrder(bylawTree);
+
+  //console.log('rules:', rules.map(x => _.pick(x, ['destPath', 'sourcesAbsolute', 'sourcesAbsolute'])))
+
+  const orderMap = _.chain(rules)
+    .map((x, i) => [x.destPath, i])
+    .fromPairs()
+    .value();
 
   return (state, action) => {
+    // console.log('-----------------')
+    // console.log('EXECUTING ', action)
     return _.chain(rules)
-      .filter(rule => _config.ruleMatcher(rule,action))
+
+
+      // filter to those that match the action
+      .filter(rule => _config.ruleMatcher(rule, action))
+
+      // merge in all the dependent rules
+      .map((primaryRule) => {
+        // console.log('primaryRule: ', primaryRule.destPath);
+
+        // Find the rules that this rule depends on
+        const providerRules = _.values(getTriggerDependencies(bylawTree, primaryRule));
+
+        // console.log(primaryRule.destPath, ' relies on:', providerRules.map(x => x.destPath));
+
+        //find the rules that depend on this rule
+        const dependantRules = rules.filter(r => {
+          return getTriggerDependencies(bylawTree, r)[primaryRule.destPath];
+        });
+
+        //console.log(primaryRule.destPath, 'is relied on by', dependantRules.map(x => x.destPath));
+
+        return [primaryRule].concat(providerRules).concat(dependantRules);
+      })
+      .flatten()
+      .sortBy(rule => orderMap[rule.destPath])
+
+       // clear out any duplicates
+      .uniqBy(rule => rule.destPath)
+
+      //.tap(rules => {
+      //  console.log('execution order:', rules.map(x => x.destPath))
+      //})
+
+      // reduce our list of rules into the next state
       .reduce((state, rule) => {
-        const args = [rule.destPath].concat(rule.sourcesAbsolute).map(path => _config.getStateAtPath(state, pathStringToKeys(path)));
+
+        if(!rule.sourcesAbsolute) {
+          console.log('missing!', rule);
+        }
+
+        const dependencyArgs = [rule.destPath].concat(rule.sourcesAbsolute).map(path => {
+          return _config.getStateAtPath(state, pathStringToKeys(path));
+        });
+
+        //console.log(rule.destPath,':', dependencyArgs)
+        const args = [action].concat(dependencyArgs);
         const value = rule.value.apply(null, args);
+
         const newState = _config.updateStateAtPath(state, pathStringToKeys(rule.destPath), value);
-        // console.log(`Setting ${rule.destPath} to value ${value}`);
 
         return newState;
       }, state).value();
@@ -292,12 +349,13 @@ function compileBylaws(_bylaws, _config=_defaultConfig) {
 
 
 module.exports = {
-  resolvePath,
+  compileBylaws,
   mapSelectedNodes,
   selectNodesAndPaths,
+  findExecutionOrder,
   selectNodes,
   preprocessBylawRules,
   getDependencies,
-  findExecutionOrder,
-  compileBylaws,
+  getTriggerDependencies,
+  getAllDependencies,
 };

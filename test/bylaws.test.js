@@ -1,16 +1,19 @@
 const _ = require('lodash');
 const assert = require('assert');
-
+const sinon = require('sinon');
 const chai = require('chai');
 const { expect } = chai;
 
 const {
-  preprocessBylawRules,
-  mapSelectedNodes,
-  selectNodes,
-  getDependencies,
-  findExecutionOrder,
   compileBylaws,
+  mapSelectedNodes,
+  selectNodesAndPaths,
+  findExecutionOrder,
+  selectNodes,
+  preprocessBylawRules,
+  getDependencies,
+  getAllDependencies,
+  getTriggerDependencies,
 } = require('../src/bylaws');
 
 const suppose = require('suppose');
@@ -18,18 +21,28 @@ const suppose = require('suppose');
 suppose.defineFixture('simple_deps', (config) => {
   return preprocessBylawRules({
     a: {
+      triggers: {
+        actions: ['FOO_ACTION'],
+        onExec: ['/c'],
+      },
+
       sources: ['/c'],
-      actions: ['FOO_ACTION'],
       value: _.identity,
     },
     b: {
+      triggers: {
+        actions: ['FOO_ACTION'],
+        onExec: ['/a'],
+      },
       sources: ['/a'],
-      actions: ['FOO_ACTION'],
       value: _.identity,
     },
     c: {
+      triggers: {
+        onExec: [],
+        actions: ['FOO_ACTION'],
+      },
       sources: [],
-      actions: ['FOO_ACTION'],
       value: _.identity,
     }
   });
@@ -67,6 +80,8 @@ describe('mapSelectedNodes', () => {
   });
 });
 
+
+
 describe('selectNodes', () => {
   it('returns an array of the nodes that match the condition', () => {
     const objectTree = suppose('obj_with_foo').render();
@@ -80,7 +95,9 @@ describe('preprocessBylawRules', () => {
     const bylaws = {
       a: {
         aa: {
-          actions: ['FOO'],
+          triggers: {
+            actions: ['FOO'],
+          },
           value: _.identity,
           sources: ['/b'],
         },
@@ -94,11 +111,14 @@ describe('preprocessBylawRules', () => {
     expect(transformedRules).to.eql({
       a: {
         aa: [{
-          actions: ['FOO'],
+          triggers: {
+            actions: ['FOO'],
+          },
           value: _.identity,
           destPath: '/a/aa',
           sources: ['/b'],
           sourcesAbsolute: ['/b'],
+          triggersAbsolute: [],
         }],
       },
       b: {},
@@ -106,42 +126,51 @@ describe('preprocessBylawRules', () => {
   });
 });
 
-describe('getDependencies', () => {
+describe('getTriggerDependencies', () => {
   it('returns a object of all the ancestor dependencies keyed by their destination path', () => {
     const bylaws = suppose('simple_deps').render();
 
-    const aDeps = getDependencies(bylaws, bylaws.a[0]);
-    expect(Array.from(aDeps.values())).to.eql(['/c']);
+    const aDeps = getTriggerDependencies(bylaws, bylaws.a[0]);
+    expect(_.keys(aDeps)).to.eql(['/c']);
 
-    const bDeps  = getDependencies(bylaws, bylaws.b[0]);
-    expect(Array.from(bDeps.values())).to.eql(['/a', '/c']);
+    const bDeps  = getTriggerDependencies(bylaws, bylaws.b[0]);
+    expect(_.keys(bDeps)).to.eql(['/a', '/c']);
 
-    const cDeps  = getDependencies(bylaws, bylaws.c[0]);
-    expect(Array.from(cDeps.values())).to.eql([]);
+    const cDeps  = getTriggerDependencies(bylaws, bylaws.c[0]);
+    expect(_.keys(cDeps)).to.eql([]);
   });
+});
 
+describe('getAllDependencies', () => {
   it('Detects circular dependencies', () => {
+    // a -> c -> b -> a
     const circularDepTree = preprocessBylawRules({
       a: {
+        triggers: {
+          actions: [],
+        },
         sources: ['/c'],
-        actions: [],
         value: _.identity,
       },
       b: {
+        triggers: {
+          actions: [],
+        },
         sources: ['/a'],
-        actions: [],
         value: _.identity,
       },
       c: {
+        triggers: {
+          actions: [],
+        },
         sources: ['/b'],
-        actions: [],
         value: _.identity,
       }
     });
 
     expect(
-      () => getDependencies(circularDepTree, circularDepTree.a[0])
-    ).to.throw('Circular dependency detected');
+      () => getAllDependencies(circularDepTree, circularDepTree.a[0])
+    ).to.throw('Dependency cycle');
   });
 });
 
@@ -155,36 +184,51 @@ describe('findExecutionOrder', () => {
 
 describe('compileBylaws', () => {
   it('returns a function that executes the bylaws', () => {
-    const valueFn = (x='p', y='q') => {
-      return `${x + y}`;
+    let count = 0;
+    const valueFn = (action, arg1, arg2) => {
+      return arg1 + arg2;
     };
+    // const valueFn = sinon.spy((action, arg1, arg2) => {
+    //   return arg1 + arg2;
+    // });
 
-    // b -> a -> c
+    // dependency chain is a -> b -> c -> d
     const bylaws = preprocessBylawRules({
       a: {
-        sources: ['/c'],
-        actions: ['FOO_ACTION'],
+        triggers: {
+          actions: ['FOO_ACTION'],
+        },
+        sources: ['/b'],
         value: valueFn,
       },
       b: {
-        sources: ['/a'],
-        actions: ['FOO_ACTION'],
+        triggers: {
+          actions: ['FOO_ACTION'],
+        },
+        sources: ['/c'],
         value: valueFn,
       },
       c: {
-        sources: [],
-        actions: ['FOO_ACTION'],
+        triggers: {
+          actions: ['FOO_ACTION'],
+        },
+        sources: ['/d'],
         value: valueFn,
+      },
+      d: {
+        triggers: {
+          actions: ['FOO_ACTION'],
+        },
+        sources: [],
+        value: () => 'd'
       }
     });
-
-    // const order = findExecutionOrder(bylaws);
-    // console.log('order:', order)
 
     const initialState = {
       a: 'a',
       b: 'b',
       c: 'c',
+      d: 'd'
     };
 
     const action = {
@@ -196,9 +240,70 @@ describe('compileBylaws', () => {
 
     const nextState = reducer(initialState, action);
     expect(nextState).to.eql({
-      c: 'cq',
-      a: 'acq',
-      b: 'bacq',
+      a: 'abcd',
+      b: 'bcd',
+      c: 'cd',
+      d: 'd',
     });
+  });
+
+
+  it('handles proper execution of a game-like state tree', () => {
+    const incScore = (action, score = 0) => score + 1;
+
+
+    const bylawReducer = compileBylaws({
+      currentGame: {
+        player1Score: {
+          triggers: {
+            actions: ['INC_PLAYER1_SCORE'],
+          },
+          value: incScore,
+        },
+        player2Score: {
+          triggers: {
+            actions: ['INC_PLAYER2_SCORE'],
+          },
+          value: incScore,
+        },
+
+        winner: {
+          triggers: {
+            onExec: ['./player2Score', './player1Score'],
+          },
+          sources: ['./player1Score', './player2Score'],
+          value: (action, winner, score1, score2) => {
+            const targetScore = 5;
+            if (score1 >= targetScore) {
+              return 'player1';
+            } else if (score2 >= targetScore) {
+              return 'player2';
+            }
+          }
+        },
+      },
+
+      highScore: {
+        default: 0,
+
+        triggers: {
+          onExec: ['/currentGame/player1Score', '/currentGame/player2Score'],
+        },
+
+        sources: ['/currentGame/player1Score', '/currentGame/player2Score'],
+        value: (action, highScore, score1, score2) => _.max([highScore, score1, score2])
+      },
+    });
+
+    const state = _.chain([])
+      .concat(_.times(4, () => ({ type: 'INC_PLAYER1_SCORE' })))
+      .concat(_.times(5, () => ({ type: 'INC_PLAYER2_SCORE' })))
+      .reduce(bylawReducer, {})
+      .value();
+
+    expect(_.get(state, ['currentGame', 'player1Score'])).to.equal(4);
+    expect(_.get(state, ['currentGame', 'player2Score'])).to.equal(5);
+    expect(_.get(state, ['currentGame', 'winner'])).to.equal('player2');
+    expect(_.get(state, ['highScore'])).to.equal(5);
   });
 });
