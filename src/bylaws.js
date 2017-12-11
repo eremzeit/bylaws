@@ -230,7 +230,7 @@ const _defaultConfig = {
   },
 };
 
-function compileBylaws(_bylaws, _config=_defaultConfig) {
+function makeBylawReducer(_bylaws, _config=_defaultConfig) {
   const bylawTree = preprocessBylawRules(_bylaws);
   const rules = findExecutionOrder(bylawTree);
 
@@ -307,7 +307,7 @@ class BylawError extends Error {}
 
 
 module.exports = {
-  compileBylaws,
+  makeBylawReducer,
   mapSelectedNodes,
   selectNodesAndPaths,
   findExecutionOrder,

@@ -6,7 +6,7 @@ const { expect } = chai;
 const suppose = require('suppose');
 
 const {
-  compileBylaws,
+  makeBylawReducer,
   selectNodesAndPaths,
   findExecutionOrder,
   preprocessBylawRules,
@@ -162,7 +162,7 @@ describe('findExecutionOrder', () => {
   });
 });
 
-describe('compileBylaws', () => {
+describe('makeBylawReducer', () => {
   it('returns a function that executes the bylaws', () => {
     let count = 0;
     const valueFn = (action, arg1, arg2) => {
@@ -204,7 +204,7 @@ describe('compileBylaws', () => {
       type: 'FOO_ACTION',
     };
 
-    const reducer = compileBylaws(bylaws);
+    const reducer = makeBylawReducer(bylaws);
     expect(_.isFunction(reducer)).to.be.true;
 
     const nextState = reducer(initialState, action);
@@ -219,7 +219,7 @@ describe('compileBylaws', () => {
   it('handles proper execution of a game-like state tree', () => {
     const incScore = (action, score = 0) => score + 1;
 
-    const bylawReducer = compileBylaws({
+    const bylawReducer = makeBylawReducer({
       currentGame: {
         player1Score: bylaw({
           actions: ['INC_PLAYER1_SCORE'],
