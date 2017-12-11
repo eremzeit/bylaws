@@ -12,7 +12,7 @@ function relativeFilePathToAbsolute (_cwdPathStr) {
       const fileName = _.last(currentPathArray);
       const dirPath = pathJoin(_relativePathStr, pathArrayToPathStr(cwdPathArray, true));
       const r = pathArrayToPathStr(pathJoin(dirPath, fileName));
-      //console.log('relativePathToAbsolute', [_relativePathStr, _cwdPathStr, r]);
+      //onsole.log('relativePathToAbsolute', [_relativePathStr, _cwdPathStr, r]);
       return r;
     }
   };
@@ -128,6 +128,62 @@ function dirPathAndFileName(filePath) {
   ];
 }
 
+function mapSelectedNodes(_object, _isSelected, _mapFn, _currentPath = []) {
+  const keyValuesPairs = _.entries(_object);
+
+  assert(!_.isString(_object), 'Object cannot be a string');
+
+  return _.chain(_object).toPairs().map((pair) => {
+    const [key, value] = pair;
+    const currentPath = _currentPath.slice();
+    currentPath.push(key);
+
+    if (_isSelected(value)) {
+      const mappedValue = _mapFn(value, currentPath);
+      return [key, mappedValue];
+    } else if (_.isObject(value)){
+      return [key, mapSelectedNodes(value, _isSelected, _mapFn, currentPath)];
+    }
+  }).compact().fromPairs().value();
+}
+
+// Traverses the tree and returns a last of nodes that return true
+// when passed into _selectFn.
+function selectNodesAndPaths(_object, _selectFn) {
+  const nodes = [];
+
+  const _selectNodes = (_object, _currentPath=[]) => {
+    const keyValuesPairs = _.entries(_object);
+    _.chain(_object).toPairs().each((pair) => {
+
+      const [key, value] = pair;
+      const currentPath = _currentPath.slice();
+      currentPath.push(key);
+
+      if (_selectFn(value)) {
+        nodes.push([currentPath, value]);
+      } else if (_.isObject(value)) {
+        _selectNodes(value, currentPath);
+      }
+    }).fromPairs().value();
+  };
+
+  if (_selectFn(_object)) {
+    nodes.push([[], _object]);
+  } else {
+    _selectNodes(_object);
+  }
+
+  return nodes;
+}
+
+function selectNodes(_object, _selectFn) {
+  return _.map(
+    selectNodesAndPaths(_object, _selectFn),
+    x => x[1]
+  );
+}
+
 module.exports = {
   pathStringToKeys,
   pathJoin,
@@ -135,4 +191,7 @@ module.exports = {
   isAbsolutePath,
   pathArrayToPathStr,
   dirPathAndFileName,
+  mapSelectedNodes,
+  selectNodes,
+  selectNodesAndPaths
 };

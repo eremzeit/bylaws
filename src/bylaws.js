@@ -1,23 +1,22 @@
 const _ = require('lodash');
 const assert = require('assert');
 
+const enableDebugging = false;
+
 const {
   pathStringToKeys,
   pathArrayToPathStr,
   pathJoin,
   isAbsolutePath,
   dirPathAndFileName,
+  mapSelectedNodes,
+  selectNodes,
+  selectNodesAndPaths,
 } = require('./paths');
 
-// this is a bit awkward.  In the next version detection
-// should be done either 1) via a reserved keyword or 2)
-// by somehow via the observation that bylaw rules don't have any
-// great-grandchildren
-// leaf-nodes,
 function isBylawRule(object) {
   return object
-      && object.hasOwnProperty('value')
-      && object.hasOwnProperty('triggers')
+      && object.__bylaw
 }
 
 function isIterable(obj) {
@@ -26,67 +25,17 @@ function isIterable(obj) {
     return false;
   }
 
-  return typeof obj[Symbol.iterator] === 'function';
+  return typeof obj[Symbol.iterator] === 'function'
+    && !_.isString(obj);
 }
 
+const isLeafNode = _node => isBylawRule(_node) || !_.isObject(_node);
 
-function mapSelectedNodes(_object, _isSelected, _mapFn, _currentPath = []) {
-  const keyValuesPairs = _.entries(_object);
+const isValidLeafNode = _node => isBylawRule(_node) ||
+  (_.isArray(_node) && !_node.find(x => !isBylawRule(x)));
 
-  assert(!_.isString(_object), 'Object cannot be a string');
-
-  return _.chain(_object).toPairs().map((pair) => {
-    const [key, value] = pair;
-    const currentPath = _currentPath.slice();
-    currentPath.push(key);
-
-    if (_isSelected(value)) {
-      const mappedValue = _mapFn(value, currentPath);
-      return [key, mappedValue];
-    } else {
-      return [key, mapSelectedNodes(value, _isSelected, _mapFn, currentPath)];
-    }
-  }).fromPairs().value();
-}
-
-// Traverses the tree and returns a last of nodes that return true
-// when passed into _selectFn.
-function selectNodesAndPaths(_object, _selectFn) {
-  const nodes = [];
-
-  const _selectNodes = (_object, _currentPath=[]) => {
-    const keyValuesPairs = _.entries(_object);
-    _.chain(_object).toPairs().each((pair) => {
-
-      const [key, value] = pair;
-      const currentPath = _currentPath.slice();
-      currentPath.push(key);
-
-      if (_selectFn(value)) {
-        nodes.push([currentPath, value]);
-      } else if (_.isObject(value)) {
-        _selectNodes(value, currentPath);
-      }
-    }).fromPairs().value();
-  };
-
-  if (_selectFn(_object)) {
-    nodes.push([[], _object]);
-  } else {
-    _selectNodes(_object);
-  }
-
-  return nodes;
-}
-
-function selectNodes(_object, _selectFn) {
-  return _.map(
-    selectNodesAndPaths(_object, _selectFn),
-    x => x[1]
-  );
-}
-const isLeafNode = _node => isBylawRule(_node) || _.isArray(_node);
-const mapLeafNodes = _.curry(mapSelectedNodes)(_, isLeafNode, _);
+// mapLeafNodes(node, mapFn) -> Array
+const mapLeafNodes = _.curry(mapSelectedNodes)(_, isValidLeafNode, _);
 
 function relativeToAbsolute(_currentPathStr) {
   return (_relativePath) => {
@@ -99,8 +48,7 @@ function relativeToAbsolute(_currentPathStr) {
   };
 }
 
-const getTriggersActions = (_rule) => _.get(_rule, ['triggers', 'actions'], []);
-const getTriggersOnExec = (_rule) => _.get(_rule, ['triggers', 'onExec'], []);
+const getTriggersActions = (_rule) => _.get(_rule, ['actions'], []);
 
 function preprocessBylawRules(_bylawNode) {
   const tree = mapLeafNodes(
@@ -108,7 +56,15 @@ function preprocessBylawRules(_bylawNode) {
     (_nodes, _currentPathArray) => {
       let nodes = _nodes;
 
-      if (isBylawRule(nodes)) {
+      if (!isValidLeafNode(_nodes)) {
+        // If we get here then our selection fn was incorrect or they inputed an invalid rule syntax
+        console.error('Errant path:', _currentPathArray)
+        throw new BylawError('Bylaw parsing error.  Did you call the bylaw function on your rule? ' + "'" + _nodes + "'");
+      }
+
+      if (_.isString(nodes)) {
+        throw new BylawError('Bylaw parsing error.');
+      } else if (isBylawRule(nodes)) {
         nodes = [nodes];
       }
 
@@ -119,22 +75,18 @@ function preprocessBylawRules(_bylawNode) {
           const destPath = pathArrayToPathStr(_currentPathArray, true);
 
           const sources = _x.sources || [];
-          const triggers = getTriggersOnExec(_x) || [];
 
           const currentPathStr = pathArrayToPathStr(_currentPathArray, true);
           const sourcesAbsolute = sources.map(relativeToAbsolute(currentPathStr));
-          const triggersAbsolute = triggers.map(relativeToAbsolute(currentPathStr));
 
 //           console.log('')
 //           console.log('processing node at:', destPath)
 //           console.log('sources:', sourcesAbsolute)
-//           console.log('triggers:', triggersAbsolute)
 //
           //console.log(`abs sources at ${destPath}: `, sourcesAbsolute);
           const r = Object.assign({}, _x, {
             destPath,
             sourcesAbsolute,
-            triggersAbsolute,
           });
 
           //console.log('processed node:', r)
@@ -181,6 +133,9 @@ function isPathLeafNode(_bylawNode, _path) {
   return isLeafNode(findNodeAtPath(_bylawNode, _path));
 }
 
+function getSourceDependencies(_bylawTree, _rule, _visited=[]) {
+  return getDependencies(_bylawTree, _rule, _visited, x => x.sourcesAbsolute);
+}
 
 function getTriggerDependencies(_bylawTree, _rule, _visited=[]) {
   return getDependencies(_bylawTree, _rule, _visited, x => x.triggersAbsolute);
@@ -191,7 +146,7 @@ function getAllDependencies(_bylawTree, _rule, _visited=[]) {
     _bylawTree,
     _rule,
     _visited,
-    x => [].concat(x.triggersAbsolute).concat(x.sourcesAbsolute)
+    x => [].concat(x.sourcesAbsolute)
   );
 }
 
@@ -217,8 +172,6 @@ function getDependencies(_bylawTree, _rule, _visited=[], _pathSelector, _depth =
       // console.log(ind(_depth), 'children:', r.map(x => x.destPath));
       return r;
     })
-
-
 
     .map((depRule) => {
       let ancestorDepRules = getDependencies(_bylawTree, depRule, _visited, _pathSelector, _depth + 1);
@@ -289,31 +242,23 @@ function compileBylaws(_bylaws, _config=_defaultConfig) {
     .value();
 
   return (state, action) => {
-    // console.log('-----------------')
-    // console.log('EXECUTING ', action)
+    log('-----------------')
+    log('EXECUTING ', action)
     return _.chain(rules)
-
 
       // filter to those that match the action
       .filter(rule => _config.ruleMatcher(rule, action))
 
       // merge in all the dependent rules
       .map((primaryRule) => {
-        // console.log('primaryRule: ', primaryRule.destPath);
-
-        // Find the rules that this rule depends on
-        const providerRules = _.values(getTriggerDependencies(bylawTree, primaryRule));
-
-        // console.log(primaryRule.destPath, ' relies on:', providerRules.map(x => x.destPath));
-
         //find the rules that depend on this rule
         const dependantRules = rules.filter(r => {
-          return getTriggerDependencies(bylawTree, r)[primaryRule.destPath];
+          return getAllDependencies(bylawTree, r)[primaryRule.destPath];
         });
 
-        //console.log(primaryRule.destPath, 'is relied on by', dependantRules.map(x => x.destPath));
+        // log(primaryRule.destPath, 'is relied on by', dependantRules.map(x => x.destPath));
 
-        return [primaryRule].concat(providerRules).concat(dependantRules);
+        return [primaryRule].concat(dependantRules);
       })
       .flatten()
       .sortBy(rule => orderMap[rule.destPath])
@@ -321,24 +266,25 @@ function compileBylaws(_bylaws, _config=_defaultConfig) {
        // clear out any duplicates
       .uniqBy(rule => rule.destPath)
 
-      //.tap(rules => {
-      //  console.log('execution order:', rules.map(x => x.destPath))
-      //})
+      .tap(rules => {
+        log('execution order:', rules.map(x => x.destPath))
+      })
 
       // reduce our list of rules into the next state
       .reduce((state, rule) => {
+        let currentState = _config.getStateAtPath(state, pathStringToKeys(rule.destPath));
 
-        if(!rule.sourcesAbsolute) {
-          console.log('missing!', rule);
+        if (_.isUndefined(currentState)) {
+          currentState = rule.initialValue;
         }
 
-        const dependencyArgs = [rule.destPath].concat(rule.sourcesAbsolute).map(path => {
+        const dependencyArgs = rule.sourcesAbsolute.map(path => {
           return _config.getStateAtPath(state, pathStringToKeys(path));
         });
 
-        //console.log(rule.destPath,':', dependencyArgs)
-        const args = [action].concat(dependencyArgs);
+        const args = [action, currentState].concat(dependencyArgs);
         const value = rule.value.apply(null, args);
+        log(rule.destPath,':', args, ' -> ')
 
         const newState = _config.updateStateAtPath(state, pathStringToKeys(rule.destPath), value);
 
@@ -346,6 +292,18 @@ function compileBylaws(_bylaws, _config=_defaultConfig) {
       }, state).value();
   };
 }
+
+function bylaw(obj) {
+  return Object.assign({}, obj, {__bylaw: true});
+}
+
+function log() {
+  if (enableDebugging) {
+    console.log.apply(null, Array.from(arguments));
+  }
+}
+
+class BylawError extends Error {}
 
 
 module.exports = {
@@ -358,4 +316,6 @@ module.exports = {
   getDependencies,
   getTriggerDependencies,
   getAllDependencies,
+  bylaw,
+  isBylawRule,
 };
