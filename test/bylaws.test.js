@@ -21,30 +21,63 @@ const {
 suppose.defineFixture('simple_deps', (config) => {
   return preprocessBylawRules({
     a: bylaw({
-      triggers: {
-        actions: ['FOO_ACTION'],
-        onExec: ['/c'],
-      },
-
+      actions: ['FOO_ACTION'],
       sources: ['/c'],
       value: _.identity,
     }),
     b: bylaw({
-      triggers: {
-        actions: ['FOO_ACTION'],
-        onExec: ['/a'],
-      },
+      actions: ['FOO_ACTION'],
       sources: ['/a'],
       value: _.identity,
     }),
     c: bylaw({
-      triggers: {
-        onExec: [],
-        actions: ['FOO_ACTION'],
-      },
-      sources: [],
+      actions: ['FOO_ACTION'],
       value: _.identity,
     })
+  });
+});
+
+suppose.defineFixture('path_params', (config) => {
+  return preprocessBylawRules({
+    a: {
+      '{b}/{c}/{d}': bylaw({
+        actions: ['FOO_ACTION'],
+
+        // allows us to define the domain (the set of all possible inputs) that this
+        // dynamic rule needs to keep tabs for.
+        whereIsIn: {
+          b: ['foo', 'bar', 'baz'],
+
+          c: (domain) => {
+            //domain.keys.b
+            //domain.keys.c
+            //domain.keys.d
+            //domain.parent
+
+            return bVal.keys();
+          },
+
+          d: (cKey, cVal) => {
+            //domain.keys.b
+            //domain.keys.c
+            //domain.keys.d
+            //domain.parent
+            return cVal.keys();
+          }
+        },
+
+        nextValue: (domain) {
+          // domain.sources
+          // domain.params.b
+          // domain.params.c
+          // domain.params.d
+          // domain.current
+          // domain.action
+          //
+          return nextState;
+        },
+      }),
+    },
   });
 });
 
@@ -265,5 +298,10 @@ describe('makeBylawReducer', () => {
     expect(_.get(state, ['currentGame', 'player2Score'])).to.equal(5);
     expect(_.get(state, ['currentGame', 'winner'])).to.equal('player2');
     expect(_.get(state, ['highScore'])).to.equal(5);
+  });
+
+  it('can handle dynamic paths', () => {
+
+
   });
 });
